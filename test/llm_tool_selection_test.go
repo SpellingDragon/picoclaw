@@ -87,7 +87,7 @@ func TestLLMToolSelection_WithContextFiltering(t *testing.T) {
 func TestSkillRecommender_WithRealLLM(t *testing.T) {
 	// Load API key from environment (source ~/.bashrc first if needed)
 	apiKey := os.Getenv("ZAI_API_KEY")
-	
+
 	// Try to load from .bashrc if not set in current env
 	if apiKey == "" {
 		t.Log("ZAI_API_KEY not in current env, test will skip")
@@ -122,18 +122,31 @@ description: ` + desc + `
 	allSkills := loader.ListSkills()
 	require.Len(t, allSkills, 4)
 
-	// Create model config for Zhipu (using ZAI_API_KEY)
-	modelCfg := &config.ModelConfig{
-		ModelName: "zhipu-test",
-		Model:     "zhipu/glm-4-flash",
-		APIKey:    apiKey,
-	}
-
-	provider, _, err := providers.CreateProviderFromConfig(modelCfg)
+	// Load base config from test/config.json and inject API key
+	configPath := testConfigPath(t)
+	cfg, err := config.LoadConfig(configPath)
 	require.NoError(t, err)
 
+	// Inject API key into the model config
+	for i := range cfg.ModelList {
+		if cfg.ModelList[i].ModelName == cfg.Agents.Defaults.Model {
+			cfg.ModelList[i].APIKey = apiKey
+			break
+		}
+	}
+
+	// Create provider from config (using agent's configured model)
+	provider, modelID, err := providers.CreateProvider(cfg)
+	require.NoError(t, err)
+
+	// Use the model from config for recommender
+	modelToUse := modelID
+	if modelToUse == "" {
+		modelToUse = cfg.Agents.Defaults.Model
+	}
+
 	// Create recommender
-	recommender := agent.NewSkillRecommender(loader, provider, "glm-4-flash")
+	recommender := agent.NewSkillRecommender(loader, provider, modelToUse)
 
 	t.Run("recommender selects relevant skills for weather query", func(t *testing.T) {
 		// Test case 1: Weather-related query
