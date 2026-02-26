@@ -191,23 +191,38 @@ func (ai *AgentInstance) SetSkillsFilter(filters []string) {
 
 // EnableSkillRecommender enables intelligent skill recommendation for this agent.
 // The recommender will automatically select relevant skills based on context.
+// It uses the model from agent's configuration (Candidates list) for recommendations.
 //
 // Parameters:
-//   - model: Model to use for LLM-based recommendations (optional, uses agent's model if empty)
+//   - model: Model to use for LLM-based recommendations (optional, uses agent's Candidates if empty)
 //   - weights: Optional custom weights for scoring algorithm (channel, keyword, history, recency)
 //
 // Example:
 //
-//	// Enable with default settings
+//	// Enable with default settings (uses agent's configured model)
 //	agent.EnableSkillRecommender()
+//
+//	// Enable with specific model from model_list
+//	agent.EnableSkillRecommender("glm-4-flash")
 //
 //	// Enable with custom weights
 //	agent.EnableSkillRecommenderWithWeights(0.5, 0.3, 0.15, 0.05)
 func (ai *AgentInstance) EnableSkillRecommender(model string, weights ...[4]float64) {
+	// If no specific model requested, use agent's configured model or first candidate
 	if model == "" {
-		model = ai.Model
+		if ai.Model != "" {
+			model = ai.Model
+		} else if len(ai.Candidates) > 0 {
+			// Use first candidate from model_list (format: "provider/model")
+			firstCandidate := ai.Candidates[0]
+			model = firstCandidate.Provider + "/" + firstCandidate.Model
+		} else {
+			model = "local" // Fallback
+		}
 	}
 
+	// Create provider for the recommender using the same provider as agent
+	// This allows recommender to use different model but same credentials
 	recommender := NewSkillRecommender(
 		ai.ContextBuilder.skillsLoader,
 		ai.Provider,
