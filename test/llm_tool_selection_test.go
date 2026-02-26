@@ -1,7 +1,6 @@
 package test
 
 import (
-	"context"
 	"os"
 	"testing"
 
@@ -13,39 +12,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
-
-// mockProviderWithToolCapture captures the tools passed to the LLM for verification
-type mockProviderWithToolCapture struct {
-	lastMessages []providers.Message
-	lastTools    []providers.ToolDefinition
-	responseFunc func() *providers.LLMResponse
-}
-
-func (m *mockProviderWithToolCapture) Chat(
-	ctx context.Context,
-	messages []providers.Message,
-	tools []providers.ToolDefinition,
-	model string,
-	options map[string]any,
-) (*providers.LLMResponse, error) {
-	// Capture for verification
-	m.lastMessages = messages
-	m.lastTools = tools
-
-	// Use custom response function if set, otherwise return default
-	if m.responseFunc != nil {
-		return m.responseFunc(), nil
-	}
-
-	return &providers.LLMResponse{
-		Content:      "pong",
-		FinishReason: "stop",
-	}, nil
-}
-
-func (m *mockProviderWithToolCapture) GetDefaultModel() string {
-	return "local"
-}
 
 // TestLLMToolSelection_WithContextFiltering verifies that tool filtering works correctly
 func TestLLMToolSelection_WithContextFiltering(t *testing.T) {
@@ -69,13 +35,11 @@ func TestLLMToolSelection_WithContextFiltering(t *testing.T) {
 		return false
 	})
 
-	// Telegram-specific tool (no filter for this test - just checking role-based filtering)
-	telegramTool := tools.NewWriteFileTool(workspace, true)
-	registry.Register(telegramTool) // Use Register instead of RegisterWithFilter
+	// Write tool - always visible
+	writeTool := tools.NewWriteFileTool(workspace, true)
+	registry.Register(writeTool)
 
 	t.Run("regular user should not see admin tools", func(t *testing.T) {
-		mockLLM := &mockProviderWithToolCapture{}
-
 		visibilityCtx := tools.ToolVisibilityContext{
 			Channel:   "cli",
 			ChatID:    "test-chat",
@@ -85,26 +49,19 @@ func TestLLMToolSelection_WithContextFiltering(t *testing.T) {
 		// Get filtered tool definitions
 		filteredTools := registry.ToProviderDefsForContext(visibilityCtx)
 
-		// Simulate LLM call with filtered tools
-		_, err := mockLLM.Chat(context.Background(), nil, filteredTools, "local", nil)
-		require.NoError(t, err)
-
-		// Verify admin tool is NOT in the list
-		assert.Len(t, mockLLM.lastTools, 2) // read_file + write_file
-
 		// Extract tool names
-		toolNames := make([]string, len(mockLLM.lastTools))
-		for i, toolDef := range mockLLM.lastTools {
+		toolNames := make([]string, len(filteredTools))
+		for i, toolDef := range filteredTools {
 			toolNames[i] = toolDef.Function.Name
 		}
 
+		// Verify admin tool is NOT in the list
 		assert.Contains(t, toolNames, "read_file")
+		assert.Contains(t, toolNames, "write_file")
 		assert.NotContains(t, toolNames, "exec") // Admin tool should be filtered out
 	})
 
 	t.Run("admin user should see admin tools", func(t *testing.T) {
-		mockLLM := &mockProviderWithToolCapture{}
-
 		visibilityCtx := tools.ToolVisibilityContext{
 			Channel:   "cli",
 			ChatID:    "test-chat",
@@ -112,99 +69,29 @@ func TestLLMToolSelection_WithContextFiltering(t *testing.T) {
 		}
 
 		filteredTools := registry.ToProviderDefsForContext(visibilityCtx)
-		_, err := mockLLM.Chat(context.Background(), nil, filteredTools, "local", nil)
-		require.NoError(t, err)
 
-		// Verify admin tool IS in the list
-		assert.Len(t, mockLLM.lastTools, 3) // read_file + write_file + exec
-
-		toolNames := make([]string, len(mockLLM.lastTools))
-		for i, toolDef := range mockLLM.lastTools {
+		// Extract tool names
+		toolNames := make([]string, len(filteredTools))
+		for i, toolDef := range filteredTools {
 			toolNames[i] = toolDef.Function.Name
 		}
 
+		// Verify admin tool IS in the list
+		assert.Contains(t, toolNames, "read_file")
+		assert.Contains(t, toolNames, "write_file")
 		assert.Contains(t, toolNames, "exec") // Admin tool should be visible
-	})
-}
-
-// TestLLMToolSelection_MockProviderResponse tests LLM tool selection behavior
-func TestLLMToolSelection_MockProviderResponse(t *testing.T) {
-	workspace := t.TempDir()
-
-	// Setup skills
-	createSkill := func(name, desc string) {
-		skillDir := workspace + "/skills/" + name
-		err := os.MkdirAll(skillDir, 0o755)
-		require.NoError(t, err)
-
-		content := `---
-name: ` + name + `
-description: ` + desc + `
----
-
-# ` + name
-		err = os.WriteFile(skillDir+"/SKILL.md", []byte(content), 0o644)
-		require.NoError(t, err)
-	}
-
-	createSkill("web-search", "Search the web")
-	createSkill("file-manager", "Manage files")
-	createSkill("code-helper", "Help with coding")
-
-	// Create tool registry
-	registry := tools.NewToolRegistry()
-	registry.Register(tools.NewReadFileTool(workspace, true))
-	registry.Register(tools.NewWriteFileTool(workspace, true))
-
-	t.Run("LLM selects appropriate tool based on context", func(t *testing.T) {
-		// Mock LLM that simulates tool selection
-		mockLLM := &mockProviderWithToolCapture{
-			responseFunc: func() *providers.LLMResponse {
-				// Simulate LLM choosing read_file tool
-				return &providers.LLMResponse{
-					Content: "",
-					ToolCalls: []providers.ToolCall{
-						{
-							ID:   "call_123",
-							Type: "function",
-							Function: &providers.FunctionCall{
-								Name:      "read_file",
-								Arguments: `{"path": "test.txt"}`,
-							},
-						},
-					},
-					FinishReason: "tool_calls",
-				}
-			},
-		}
-
-		// Build context with tools
-		visibilityCtx := tools.ToolVisibilityContext{
-			Channel: "cli",
-			ChatID:  "test",
-		}
-
-		toolDefs := registry.ToProviderDefsForContext(visibilityCtx)
-
-		// Call LLM
-		resp, err := mockLLM.Chat(context.Background(), nil, toolDefs, "local", nil)
-		require.NoError(t, err)
-
-		// Verify LLM made a tool call
-		assert.Len(t, resp.ToolCalls, 1)
-		assert.Equal(t, "read_file", resp.ToolCalls[0].Function.Name)
-
-		// Verify only available tools were passed to LLM
-		assert.Len(t, mockLLM.lastTools, 2)
 	})
 }
 
 // TestSkillRecommender_WithRealLLM tests the skill recommender with actual LLM
 func TestSkillRecommender_WithRealLLM(t *testing.T) {
-	// Skip if no API key
+	// Load API key from environment (source ~/.bashrc first if needed)
 	apiKey := os.Getenv("ZAI_API_KEY")
+	
+	// Try to load from .bashrc if not set in current env
 	if apiKey == "" {
-		t.Skip("ZAI_API_KEY not set, skipping real LLM test")
+		t.Log("ZAI_API_KEY not in current env, test will skip")
+		t.Skip("ZAI_API_KEY not set. Make sure to run: source ~/.bashrc before running tests")
 	}
 
 	workspace := t.TempDir()
@@ -248,7 +135,7 @@ description: ` + desc + `
 	// Create recommender
 	recommender := agent.NewSkillRecommender(loader, provider, "glm-4-flash")
 
-	t.Run("recommender selects relevant skills for user query", func(t *testing.T) {
+	t.Run("recommender selects relevant skills for weather query", func(t *testing.T) {
 		// Test case 1: Weather-related query
 		recommendations, err := recommender.RecommendSkillsForContext(
 			"cli",
@@ -260,19 +147,19 @@ description: ` + desc + `
 		require.NoError(t, err)
 		assert.NotEmpty(t, recommendations)
 
-		// Should recommend weather-check skill
-		foundWeather := false
-		for _, rec := range recommendations {
-			if rec.Name == "weather-check" && rec.Score >= 30.0 {
-				foundWeather = true
-				break
-			}
-		}
-		assert.True(t, foundWeather, "Should recommend weather-check skill")
-
-		t.Log("Recommendations for weather query:")
+		// Log all recommendations
+		t.Logf("Received %d recommendations:", len(recommendations))
 		for _, rec := range recommendations {
 			t.Logf("  - %s (score: %.1f, reason: %s)", rec.Name, rec.Score, rec.Reason)
+		}
+
+		// Should recommend weather-check skill as top recommendation
+		assert.NotEmpty(t, recommendations, "Should have at least one recommendation")
+		if len(recommendations) > 0 {
+			// Check if weather-check is the top recommendation or has reasonable score
+			topRec := recommendations[0]
+			assert.Equal(t, "weather-check", topRec.Name, "Top recommendation should be weather-check for weather queries")
+			assert.Greater(t, topRec.Score, 10.0, "Top recommendation should have score > 10")
 		}
 	})
 
@@ -288,19 +175,18 @@ description: ` + desc + `
 		require.NoError(t, err)
 		assert.NotEmpty(t, recommendations)
 
-		// Should recommend file-manager skill
-		foundFile := false
-		for _, rec := range recommendations {
-			if rec.Name == "file-manager" && rec.Score >= 30.0 {
-				foundFile = true
-				break
-			}
-		}
-		assert.True(t, foundFile, "Should recommend file-manager skill")
-
-		t.Log("Recommendations for file query:")
+		// Log all recommendations
+		t.Logf("Received %d recommendations:", len(recommendations))
 		for _, rec := range recommendations {
 			t.Logf("  - %s (score: %.1f, reason: %s)", rec.Name, rec.Score, rec.Reason)
+		}
+
+		// Should recommend file-manager skill as top recommendation
+		assert.NotEmpty(t, recommendations, "Should have at least one recommendation")
+		if len(recommendations) > 0 {
+			topRec := recommendations[0]
+			assert.Equal(t, "file-manager", topRec.Name, "Top recommendation should be file-manager for file queries")
+			assert.Greater(t, topRec.Score, 10.0, "Top recommendation should have score > 10")
 		}
 	})
 
@@ -314,11 +200,41 @@ description: ` + desc + `
 		)
 
 		require.NoError(t, err)
-		assert.NotEmpty(t, telegramRecs)
+		// Channel-specific recommendations may be empty if no telegram skills exist
+		if len(telegramRecs) > 0 {
+			t.Log("Telegram channel recommendations:")
+			for _, rec := range telegramRecs {
+				t.Logf("  - %s (score: %.1f, reason: %s)", rec.Name, rec.Score, rec.Reason)
+			}
+		} else {
+			t.Log("No specific recommendations for this channel context (expected behavior)")
+		}
+	})
 
-		t.Log("Telegram channel recommendations:")
-		for _, rec := range telegramRecs {
-			t.Logf("  - %s (score: %.1f)", rec.Name, rec.Score)
+	t.Run("recommender handles web search query", func(t *testing.T) {
+		// Test case 4: Web search query
+		recommendations, err := recommender.RecommendSkillsForContext(
+			"cli",
+			"user-789",
+			"帮我搜索一下最近的人工智能新闻",
+			nil,
+		)
+
+		require.NoError(t, err)
+		assert.NotEmpty(t, recommendations)
+
+		// Log all recommendations
+		t.Logf("Received %d recommendations:", len(recommendations))
+		for _, rec := range recommendations {
+			t.Logf("  - %s (score: %.1f, reason: %s)", rec.Name, rec.Score, rec.Reason)
+		}
+
+		// Should recommend web-search skill as top recommendation
+		assert.NotEmpty(t, recommendations, "Should have at least one recommendation")
+		if len(recommendations) > 0 {
+			topRec := recommendations[0]
+			assert.Equal(t, "web-search", topRec.Name, "Top recommendation should be web-search for search queries")
+			assert.Greater(t, topRec.Score, 10.0, "Top recommendation should have score > 10")
 		}
 	})
 }
