@@ -81,6 +81,13 @@ func TestLocalStartupConfig(t *testing.T) {
 }
 
 func TestLocalScenarioCoverage(t *testing.T) {
+	// Load base config from test/config.json
+	configPath := testConfigPath(t)
+	_, err := config.LoadConfig(configPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+
 	workspace := t.TempDir()
 	copyStartupFixtures(t, workspace)
 
@@ -191,6 +198,13 @@ func TestLocalStartupLoadFlow(t *testing.T) {
 }
 
 func TestLocalHeartbeatSpawnScenario(t *testing.T) {
+	// Load base config from test/config.json
+	configPath := testConfigPath(t)
+	_, err := config.LoadConfig(configPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+
 	workspace := t.TempDir()
 	heartbeatPath := filepath.Join(workspace, "HEARTBEAT.md")
 	if err := os.WriteFile(heartbeatPath, []byte("- Report status"), 0o644); err != nil {
